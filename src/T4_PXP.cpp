@@ -21,44 +21,16 @@
  */
 
 #include "T4_PXP.h"
-typedef struct
-{
-    volatile uint32_t CTRL;
-    volatile uint32_t STAT;
-    volatile uint32_t OUT_CTRL;
-    volatile void*    OUT_BUF;
-    volatile void*    OUT_BUF2;
-    volatile uint32_t OUT_PITCH;
-    volatile uint32_t OUT_LRC;
-    volatile uint32_t OUT_PS_ULC;
-    volatile uint32_t OUT_PS_LRC;
-    volatile uint32_t OUT_AS_ULC;
-    volatile uint32_t OUT_AS_LRC;
-    volatile uint32_t PS_CTRL;
-    volatile void*    PS_BUF;
-    volatile void*    PS_UBUF;
-    volatile void*    PS_VBUF;
-    volatile uint32_t PS_PITCH;
-    volatile uint32_t PS_BACKGROUND;
-    volatile uint32_t PS_SCALE;
-    volatile uint32_t PS_OFFSET;
-    volatile uint32_t PS_CLRKEYLOW;
-    volatile uint32_t PS_CLRKEYHIGH;
-    volatile uint32_t AS_CTRL;
-    volatile void*    AS_BUF;
-    volatile uint32_t AS_PITCH;
-    volatile uint32_t AS_CLRKEYLOW;
-    volatile uint32_t AS_CLRKEYHIGH;
-    volatile uint32_t CSC1_COEF0;
-    volatile uint32_t CSC1_COEF1;
-    volatile uint32_t CSC1_COEF2;
-    volatile uint32_t POWER;
-    volatile uint32_t NEXT;
-    volatile uint32_t PORTER_DUFF_CTRL;
-} IMXRT_NEXT_PXP_t;
-
 volatile IMXRT_NEXT_PXP_t next_pxp __attribute__ ((aligned(32))) = {0};
 volatile bool PXP_done = true;
+
+void (*PXP_doneCB)() = nullptr;
+
+volatile IMXRT_NEXT_PXP_t *PXP_next_pxp() {
+  return &next_pxp;
+}
+
+
 //These are only used to flush cached buffers
 uint16_t PS_BUF_width, PS_BUF_height, PS_BUF_bytesPerPixel,
          PS_UBUF_width, PS_UBUF_height, PS_UBUF_bytesPerPixel,
@@ -85,6 +57,7 @@ void PXP_isr(){
   if((PXP_STAT & PXP_STAT_IRQ) != 0){
     PXP_STAT_CLR = PXP_STAT_IRQ;
     PXP_done = true;
+    if (PXP_doneCB) (*PXP_doneCB)();
   }
 #if defined(__IMXRT1062__) // Teensy 4.x
   asm("DSB");
@@ -223,6 +196,7 @@ void PXP_input_position(uint16_t x, uint16_t y, uint16_t x1, uint16_t y1){
     * x, y: Upper left corner
     * x1, y1: Lower right corners
     */
+  Serial.printf("PXP_input_position(%u, %u, %u, %u)\n", x, y, x1, y1);
   next_pxp.OUT_PS_ULC = PXP_XCOORD(x) | PXP_YCOORD(y);
   next_pxp.OUT_PS_LRC = PXP_XCOORD(x1) | PXP_YCOORD(y1);
 }
@@ -366,7 +340,7 @@ void PXP_setScaling(uint16_t inputWidth, uint16_t inputHeight, uint16_t outputWi
     PXP_GetScaleFactor(inputWidth, outputWidth, &decX, &scaleX);
     PXP_GetScaleFactor(inputHeight, outputHeight, &decY, &scaleY);
 
-    //next_pxp.PS_CTRL = (next_pxp.CTRL & ~(0xC00U | 0x300U)) | PXP_PS_CTRL_DECX(decX) | PXP_PS_CTRL_DECY(decY);
+    next_pxp.PS_CTRL = (next_pxp.PS_CTRL & ~(0xC00U | 0x300U)) | PXP_PS_CTRL_DECX(decX) | PXP_PS_CTRL_DECY(decY);
 
     next_pxp.PS_SCALE = PXP_XSCALE(scaleX) | PXP_YSCALE(scaleY);
 }
@@ -441,153 +415,158 @@ void PXP_ps_output(uint16_t disp_width, uint16_t disp_height, uint16_t image_wid
                    uint16_t* scr_width, uint16_t* scr_height)
 {
   
-  
-  uint32_t psUlcX = 0;
-  uint32_t psUlcY = 0;
-  uint32_t psLrcX, psLrcY;
-  if(image_width > image_height) {
-    psLrcY = psUlcX + disp_width - 1U;
-    psLrcX = psUlcY + disp_height - 1U;
-  } else {
-    psLrcX = psUlcX + disp_width - 1U;
-    psLrcY = psUlcY + disp_height - 1U;
-  }
-  uint16_t out_width, out_height, output_Width, output_Height;
+    // Lets see if we can setup a window into the camera data
+    //Serial.printf("PXP_ps_window_output(%u, %u, %u, %u.... %u, %u. %f)\n", disp_width, disp_height, image_width, image_height,
+    //              rotation, flip, scaling);
 
-  //memset((uint8_t *)d_fb, 0, sizeof_d_fb);
-  //tft.fillScreen(TFT_BLACK);
-  PXP_input_background_color(0, 0, 153);
+    // we may bypass some of the helper functions and output the data directly.
+    volatile IMXRT_NEXT_PXP_t *next_pxp = PXP_next_pxp();
 
-  /*************************************************************
-   * Configures the input buffer to image width and height.
-   * 
-   **************************************************************/
-  PXP_input_buffer(buf_in /* s_fb */, bpp_in, image_width, image_height);
 
-  /**************************************************************
-   * sets the output format to RGB565
-   * 
-   ****************************************************************/
-  // VYUY1P422, PXP_UYVY1P422
-  PXP_input_format(format_in, 0, 0, byte_swap_in);
-  if(format_in == PXP_Y8 || format_in == PXP_Y4)
-            PXP_set_csc_y8_to_rgb();
-  
-  /* sets image corners                                       *
-   * ULC: contains the upper left coordinate of the Processed Surface in the output
-   * frame buffer (in pixels). Values that are within the PXP_OUT_LRC X,Y extents are
-   * valid. The lowest valid value for these fields is 0,0. If the value of the
-   * PXP_OUT_PS_ULC is greater than the PXP_OUT_LRC, then no PS pixels will be
-   * fetched from memory, but only PXP_PS_BACKGROUND pixels will be processed by
-   * the PS engine. Pixel locations that are greater than or equal to the PS upper left
-   * coordinates, less than or equal to the PS lower right coordinates, and within the
-   * PXP_OUT_LRC extents will use the PS to render pixels into the output buffer.
-   *
-   * LRC:  contains the size, or lower right coordinate, of the output buffer NOT
-   * rotated. It is implied that the upper left coordinate of the output surface is always [0,0].
-   * When rotating the framebuffer, the PXP will automatically swap the X/Y, or WIDTH/HEIGHT
-   * to accomodate the rotated size.
-   *
-   * currently configured to match TFT width and height for rotation 0! Note the -1 used with
-   * psUlcX and psUlcY - this is per the manual.
-   */
-  PXP_input_position(psUlcX, psUlcY, psLrcX, psLrcY);  // need this to override the setup in pxp_input_buffer
+    // lets reduce down to basic.
+    PXP_input_background_color(0, 0, 153);
 
-  /*************************************************************
-   * Configures the output buffer to image width and height.
-   * width and height will be swapped depending on rotation.
-   **************************************************************/
-  if (rotation == 1 || rotation == 3) {
-    out_width = image_height;
-    out_height = image_width;
-  } else {
-    out_width = image_width;
-    out_height = image_height;
-  }
-  PXP_output_buffer(buf_out, bpp_out, out_width, out_height);
+    // Initial input stuff.
+    PXP_input_buffer(buf_in, bpp_in, image_width, image_height);
+    // VYUY1P422, PXP_UYVY1P422
+    PXP_input_format(format_in, 0, 0, byte_swap_in);
+    if (format_in == PXP_Y8 || format_in == PXP_Y4)
+        PXP_set_csc_y8_to_rgb();
 
-  /**************************************************************
-   * sets the output format to RGB565
-   * 
-   ****************************************************************/
-  PXP_output_format(format_out, 0, 0, byte_swap_out);
+    // Output stuff
+    uint16_t out_width, out_height, output_Width, output_Height;
+    if (rotation == 1 || rotation == 3) {
+        out_width = disp_height;
+        out_height = disp_width;
+    } else {
+        out_width = disp_width;
+        out_height = disp_height;
+    }
 
-  // PXP_output_clip sets OUT_LRC register
-  /* according to the RM:                                           *
-   * The PXP generates an output image in the resolution programmed *
-   * by the OUT_LRCregister.                                        *
-   * If an image is 480x320, then the for a rotation of 0 you it has*
-   * to be reversed to 320x480 since you drawing on a screen that is*
-   * 320x480 for the ILI8488.
-   *  has to be configured after the output buffer since library
-   *  configures it based on the config specied
-   ******************************************************************/
-  if (rotation == 1 || rotation == 3) {
-    PXP_output_clip(out_height - 1, out_width - 1);
-  } else {
-    PXP_output_clip(out_width - 1, out_height - 1);
-  }
+    PXP_output_buffer(buf_out, bpp_out, disp_width, disp_height);
+    PXP_output_format(format_out, 0, 0, byte_swap_out);
 
-  // Rotation
-  /* Setting this bit to 1'b0 will place the rotationre sources at  *
+    // Set the clip rect.
+    //PXP_output_clip(disp_width - 1, disp_height - 1);
+
+    // Rotation
+    /* Setting this bit to 1'b0 will place the rotationre sources at  *
    * the output stage of the PXP data path. Image compositing will  *
    * occur before pixels are processed for rotation.                *
    * Setting this bit to a 1'b1 will place the rotation resources   *
    * before image composition.                                      *
    */
-  PXP_rotate_position(0);
-  //Serial.println("Rotating");
-  // Performs the actual rotation specified
-  PXP_rotate(rotation);
- 
-  // flip - pretty straight forward
-  PXP_flip(flip);
+    PXP_rotate_position(0);
+    //Serial.println("Rotating");
+    // Performs the actual rotation specified
+    PXP_rotate(rotation);
 
-  /************************************************************
-   * if performing scaling we call out to the scaling function
-   * which will perform remaining scaling and send to display.
-   ************************************************************/
-  if(scaling > 0.0f){
-    PXP_scaling(buf_out, bpp_out, scaling, out_width, out_height, rotation, &output_Width, &output_Height);
-    *scr_width = output_Width;
-    *scr_height = output_Height;
-  } else {
-  //  PXP_process();
-  //  Serial.println("Drawing frame");
-  //  draw_frame(out_width, out_height, buf_out);
-    *scr_width = out_width;
-    *scr_height = out_height;
-  }
-  
-  PXP_process();
+    // flip - pretty straight forward
+    PXP_flip(flip);
+
+    // Lets set scaling
+    if (scaling == 0) scaling = 1.0;
+    PXP_setScaling(scaling);
+
+    // now if the input image and the scaled output image are not the same size, we may want to center either
+    // the input or the output...
+    uint32_t scaled_image_width = (uint32_t)((float)(image_width) / scaling);
+    uint32_t scaled_image_height = (uint32_t)((float)(image_height) / scaling);
+    
+
+    if (rotation == 1 || rotation == 3) {
+        PXP_output_clip(disp_height - 1, disp_width - 1);
+    } else {
+        PXP_output_clip(disp_width - 1, disp_height - 1);
+    }
+
+    uint16_t ul_x = 0;
+    uint16_t ul_y = 0;
+    uint16_t lr_x = disp_width - 1;
+    uint16_t lr_y = disp_height - 1;
+
+    if (rotation == 1 || rotation == 3) {
+        if (scaled_image_width <= disp_height) {
+            ul_x = (disp_height - scaled_image_width) / 2;
+            lr_x = ul_x + scaled_image_width - 1;
+        }
+        if (scaled_image_height <= disp_width) {
+            ul_y = (disp_width - scaled_image_height) / 2;
+            lr_y = ul_y + scaled_image_height - 1;
+        }
+    } else {
+        if (scaled_image_width <= disp_width) {
+            ul_x = (disp_width - scaled_image_width) / 2;
+            lr_x = ul_x + scaled_image_width - 1;
+        }
+        if (scaled_image_height <= disp_height) {
+            ul_y = (disp_height - scaled_image_height) / 2;
+            lr_y = ul_y + scaled_image_height - 1;
+        }
+    }
+    PXP_input_position(ul_x, ul_y, lr_x, lr_y);  // need this to override the setup in pxp_input_buffer
+
+    // See if we should input clip the image...  That is center the large image onto the screen.  later allow for panning.
+    uint8_t *buf_in_clipped = (uint8_t *)buf_in;
+
+    if (rotation == 1 || rotation == 3) {
+        if (scaled_image_width > disp_height) {
+            buf_in_clipped += ((scaled_image_width - disp_height) / 2) * bpp_in;
+        }
+
+        if (scaled_image_height > disp_width) {
+            buf_in_clipped += ((scaled_image_height - disp_width) / 2) * bpp_in * image_width;
+        }
+    } else {
+        if (scaled_image_width > disp_width) {
+            buf_in_clipped += ((scaled_image_width - disp_width) / 2) * bpp_in;
+        }
+
+        if (scaled_image_height > disp_height) {
+            buf_in_clipped += ((scaled_image_height - disp_height) / 2) * bpp_in * image_width;
+        }
+    }
+    if (buf_in_clipped != (uint8_t *)buf_in) {
+        Serial.printf("Input clip Buffer(%p -> %p)\n", buf_in, buf_in_clipped);
+        next_pxp->PS_BUF = buf_in_clipped;
+    }
+
+    *scr_width = disp_width;
+    *scr_height = disp_height;
+
+    PXP_process();
 
 }
 
+void PXP_setScaling(float scaling) {
+    // we may bypass some of the helper functions and output the data directly.
+    volatile IMXRT_NEXT_PXP_t *next_pxp = PXP_next_pxp();
 
-void PXP_scaling(void *buf_out, uint8_t bbp_out, float downScaleFact,
-                  uint16_t width, uint16_t height, uint8_t rotation,
-                  uint16_t* outputWidth, uint16_t* outputHeight) {
-  uint16_t IMG_WIDTH  = width;
-  uint16_t IMG_HEIGHT = height;
-  uint16_t output_Width = (uint16_t)((float)(IMG_WIDTH) / downScaleFact);
-  uint16_t output_Height = (uint16_t)((float)(IMG_HEIGHT) / downScaleFact);
+    // lets setup the scaling.
+    uint16_t pxp_scale = scaling * 4096;
 
-  //capture_frame(false);
-  PXP_input_background_color(0, 153, 0);
+    uint16_t scale = 0;
+    uint8_t dec = 0;
 
-  PXP_output_buffer(buf_out, bbp_out, output_Width, output_Height);
-  if(rotation == 1 || rotation == 3) {
-    PXP_output_clip( output_Height - 1, output_Width - 1);
-  } else {
-    PXP_output_clip( output_Width - 1, output_Height - 1);
-  }
-  PXP_setScaling( IMG_WIDTH, IMG_HEIGHT, output_Width, output_Height);
+    if (pxp_scale > 32768)  //8 *4096,
+    {
+        dec = 3;
+    } else if (pxp_scale > 16384) {   //4 *4096
+        dec = 2;
+    } else if (pxp_scale > 8192) {    //2 *4096
+        dec = 1;
+    } else {
+        dec = 0;
+    }
 
-  PXP_process();
-  //tft.fillScreen(TFT_GREEN);
-  //draw_frame(outputWidth, outputHeight, buf_out );
-  *outputWidth = output_Width;
-  *outputHeight = output_Height;
+    scale = pxp_scale >> (dec);
+
+    if (0 == scale) {
+        scale = 1U;
+    }
+
+    next_pxp->PS_CTRL = (next_pxp->PS_CTRL & ~(0xC00U | 0x300U)) | PXP_PS_CTRL_DECX(dec) | PXP_PS_CTRL_DECY(dec);
+    next_pxp->PS_SCALE = PXP_XSCALE(scale) | PXP_YSCALE(scale);
 
 }
 
@@ -598,4 +577,9 @@ void PXP_flip(bool flip) {
    * PXP_flip_both                                        *
    */
   PXP_flip_both(flip);
+}
+
+void PXP_setPXPDoneCB(void (*cb)()) {
+  PXP_doneCB = cb;
+
 }

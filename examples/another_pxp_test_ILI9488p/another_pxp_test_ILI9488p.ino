@@ -7,9 +7,17 @@
 #include "flexio_teensy_mm.h"
 //#include "testPattern.h"
 
+//#define use9488
+#define USE_ILI9488_P
 /************************************************/
 //Specify the pins used for Non-SPI functions of display
-#if defined(ARDUINO_TEENSY_MICROMOD)
+
+#if defined(USE_ILI9488_P)
+#define TFT_DC 13
+#define TFT_CS 11
+#define TFT_RST 12
+
+#elif defined(ARDUINO_TEENSY_MICROMOD)
 #define TFT_DC 4
 #define TFT_CS 5
 #define TFT_RST 2
@@ -18,8 +26,6 @@
 #define TFT_CS 7
 #define TFT_RST 8
 #endif
-
-#define use9488
 
 
 uint8_t bytesperpixel = 2;
@@ -40,6 +46,10 @@ ILI9488_t3 tft = ILI9488_t3(TFT_CS, TFT_DC, TFT_RST);
 #define TFT_GREEN ILI9488_GREEN
 #define TFT_BLUE ILI9488_BLUE
 #define CENTER ILI9488_t3::CENTER
+
+#elif defined(USE_ILI9488_P)
+#include "ILI948x_t4_mm.h"
+ILI948x_t4_mm tft = ILI948x_t4_mm(TFT_DC,TFT_CS,TFT_RST); //(dc, cs, rst)
 
 #else
 #include <ILI9341_t3n.h>
@@ -78,12 +88,16 @@ void setup() {
     while (Serial.read() != -1) {}
   }
 
-  // Start ILI9341
+#if defined(USE_ILI9488_P)
+  tft.begin(20);
+  tft.setBitDepth(16);
+  tft.setRotation(0);
+#else
   tft.begin();
   // Must be set to HW rotation 0 for PXP to work properly
   tft.setRotation(0);
   test_display();
-
+#endif
   /******************************************
    * Runs PXP_init and memset buffers to 0.
    ******************************************/
@@ -139,7 +153,9 @@ void loop() {
         start_pxp();
         break;
       case 't':
+      #if !defined(USE_ILI9488_P)
         test_display();
+      #endif
         break;
       case 'x':
         draw_source();
@@ -161,17 +177,26 @@ void run_pxp(uint8_t rotation, bool flip, float scaling){
   Serial.printf("Capture time (millis): %d, ", millis()-capture_time);
 
   pxp_time = micros();
+#if defined(USE_ILI9488_P)
+  PXP_ps_output(320, 480,      /* Display width and height */
+                image_width, image_height,      /* Image width and height */
+                s_fb, PXP_RGB565, 2, 0,         /* Input buffer configuration */
+                d_fb, PXP_RGB565, 2, 0,         /* Output buffer configuration */ 
+                rotation, flip, scaling,        /* Rotation, flip, scaling */
+                &outputWidth, &outputHeight);   /* Frame Out size for drawing */
+#else
   PXP_ps_output(tft.width(), tft.height(),      /* Display width and height */
                 image_width, image_height,      /* Image width and height */
                 s_fb, PXP_RGB565, 2, 0,         /* Input buffer configuration */
                 d_fb, PXP_RGB565, 2, 0,         /* Output buffer configuration */ 
                 rotation, flip, scaling,        /* Rotation, flip, scaling */
                 &outputWidth, &outputHeight);   /* Frame Out size for drawing */
+#endif
   Serial.printf("PXP time(micros) : %d, ", micros()-pxp_time);
 
-  display_time = millis();
+  display_time = micros();
   draw_frame(outputWidth, outputHeight, d_fb);
-  Serial.printf("Display time: %d\n", millis()-display_time);
+  Serial.printf("Display time (micros): %d\n", micros()-display_time);
 
 }
 
@@ -185,8 +210,13 @@ void start_pxp() {
 }
 
 void draw_frame(uint16_t width, uint16_t height, const uint16_t *buffer) {
+#if defined(USE_ILI9488_P)
+  //tft.pushPixels16bit(buffer, 0, 0, width, height); // 480x320
+  tft.pushPixels16bitDMA(buffer,0,0, width, height); // 480x320
+#else
   tft.fillScreen(TFT_BLACK);
   tft.writeRect(0, 0, width, height, buffer );
+#endif
 }
 
 void showCommands() {
@@ -208,7 +238,7 @@ void showCommands() {
 }
 
 void capture_frame(bool show_debug_info) {
-  tft.fillScreen(TFT_BLACK);
+  //tft.fillScreen(TFT_BLACK);
   #if defined(has_ida)
   memcpy((uint16_t *)s_fb, ida, sizeof(ida));
   #elif defined(has_littlejoe)
@@ -220,6 +250,7 @@ void capture_frame(bool show_debug_info) {
   #endif
 }
 
+#if !defined(USE_ILI9488_P)
 void test_display() {
   tft.setRotation(3);
   tft.fillScreen(TFT_RED);
@@ -232,6 +263,7 @@ void test_display() {
   delay(500);
   tft.setRotation(0);
 }
+#endif
 
 // This  function prints a nicely formatted output of the PXP register settings
 // The formatting does require using a monospaced font, like Courier
@@ -262,7 +294,6 @@ void PXPShow(void) {
 }
 
 void draw_source() {
-  tft.fillScreen(TFT_BLACK);
   draw_frame(image_width, image_height, s_fb);
   //tft.writeRect(CENTER, CENTER, image_width, image_height, (uint16_t *)s_fb);
 }

@@ -26,6 +26,45 @@
     #error Device has no Pixel Pipeline support
 #endif
 
+// Should be added to imxrt.h
+typedef struct
+{
+    volatile uint32_t CTRL;
+    volatile uint32_t STAT;
+    volatile uint32_t OUT_CTRL;
+    volatile void*    OUT_BUF;
+    volatile void*    OUT_BUF2;
+    volatile uint32_t OUT_PITCH;
+    volatile uint32_t OUT_LRC;
+    volatile uint32_t OUT_PS_ULC;
+    volatile uint32_t OUT_PS_LRC;
+    volatile uint32_t OUT_AS_ULC;
+    volatile uint32_t OUT_AS_LRC;
+    volatile uint32_t PS_CTRL;
+    volatile void*    PS_BUF;
+    volatile void*    PS_UBUF;
+    volatile void*    PS_VBUF;
+    volatile uint32_t PS_PITCH;
+    volatile uint32_t PS_BACKGROUND;
+    volatile uint32_t PS_SCALE;
+    volatile uint32_t PS_OFFSET;
+    volatile uint32_t PS_CLRKEYLOW;
+    volatile uint32_t PS_CLRKEYHIGH;
+    volatile uint32_t AS_CTRL;
+    volatile void*    AS_BUF;
+    volatile uint32_t AS_PITCH;
+    volatile uint32_t AS_CLRKEYLOW;
+    volatile uint32_t AS_CLRKEYHIGH;
+    volatile uint32_t CSC1_COEF0;
+    volatile uint32_t CSC1_COEF1;
+    volatile uint32_t CSC1_COEF2;
+    volatile uint32_t POWER;
+    volatile uint32_t NEXT;
+    volatile uint32_t PORTER_DUFF_CTRL;
+} IMXRT_NEXT_PXP_t;
+
+
+
 //Start PXP
 void PXP_init();
 
@@ -95,14 +134,12 @@ void PXP_SetCsc1Mode(uint8_t mode);
 void PXP_set_csc_y8_to_rgb();
 
 void PXP_flip(bool flip);
-void PXP_scaling(void *buf_out, uint8_t bbp_out, float downScaleFact,
-                  uint16_t width, uint16_t height, uint8_t rotation,
-                  uint16_t* outputWidth, uint16_t* outputHeight);
 void PXP_ps_output(uint16_t disp_width, uint16_t disp_height, uint16_t image_width, uint16_t image_height, 
                    void* buf_in, uint8_t format_in, uint8_t bpp_in, uint8_t byte_swap_in, 
                    void* buf_out, uint8_t format_out, uint8_t bpp_out, uint8_t byte_swap_out, 
                    uint8_t rotation, bool flip, float scaling, 
                    uint16_t* scr_width, uint16_t* scr_height);
+void PXP_setScaling(float scaling);
 
 
 //Call process to run the PXP with the current settings
@@ -110,3 +147,10 @@ void PXP_process();
 
 //Call to make sure the last process is finished before using the buffer with a display
 void PXP_finish();
+
+//set up a call back function that is called from the PXP ISR when process completes
+#define PXP_CALLBACK_SUPPORTED
+void PXP_setPXPDoneCB(void (*cb)());
+
+// function to return pointer the next data
+volatile IMXRT_NEXT_PXP_t *PXP_next_pxp();
